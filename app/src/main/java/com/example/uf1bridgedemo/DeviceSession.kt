@@ -56,6 +56,12 @@ class DeviceSession(
     @Volatile private var gatt: BluetoothGatt? = null
     @Volatile private var gattServicesStarted = false
     @Volatile private var gattGotFirstData    = false
+    // Set to true in handleNameRead when name is resolved but first data hasn't arrived yet.
+    // Consumed (and cleared) in onCharacteristicChanged to send the name frame at the right moment.
+    @Volatile private var namePending         = false
+    // Name captured synchronously on the GATT thread — safe to read without posting to main thread.
+    // Distinct from deviceName (Compose state) which is updated asynchronously for the UI.
+    @Volatile private var resolvedName: String? = null
 
     // ---- Per-device UF1 sequencing ----
     private val seqCounter = AtomicInteger(0)
@@ -129,6 +135,8 @@ class DeviceSession(
 
                 gattServicesStarted = false
                 gattGotFirstData    = false
+                namePending         = false
+                resolvedName        = null
                 mainHandler.post { status = Status.CONNECTED }
 
                 val mtuOk = try { g.requestMtu(64) } catch (_: Exception) { false }
@@ -207,7 +215,17 @@ class DeviceSession(
             if (uuid != umyoNameCharUuid) return
             if (st == BluetoothGatt.GATT_SUCCESS) {
                 val name = value.toString(Charsets.UTF_8).trim().takeIf { it.isNotEmpty() }
-                if (name != null) mainHandler.post { deviceName = name }
+                if (name != null) {
+                    resolvedName = name                     // sync capture for name frame encoding
+                    mainHandler.post { deviceName = name }  // async update for UI
+                    // If data already flowing, send name frame now; otherwise arm the flag so
+                    // onCharacteristicChanged sends it as soon as the first notification arrives.
+                    if (gattGotFirstData) {
+                        sendQueue.offer(uf1EncodeDeviceName(devId, nextSeq(), name))
+                    } else {
+                        namePending = true
+                    }
+                }
             }
             val svc = g.getService(umyoServiceUuid)
             if (svc != null) enableTelemetry(g, svc, onLog)
@@ -220,6 +238,7 @@ class DeviceSession(
         ) {
             if (st == BluetoothGatt.GATT_SUCCESS) {
                 gattGotFirstData = false
+                namePending      = false
                 onLog("[$mac] notifications enabled, waiting for data…")
                 thread {
                     Thread.sleep(2000)
@@ -241,10 +260,12 @@ class DeviceSession(
         ) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
                 val v = characteristic.value ?: return
-                val firstData = !gattGotFirstData
                 gattGotFirstData = true
                 if (!isStreaming()) return
-                if (firstData) sendQueue.offer(uf1EncodeDeviceName(devId, nextSeq(), deviceName))
+                if (namePending) {
+                    namePending = false
+                    sendQueue.offer(uf1EncodeDeviceName(devId, nextSeq(), resolvedName ?: mac))
+                }
                 mainHandler.post { status = Status.STREAMING }
                 handleGattNotify(v)
             }
@@ -256,10 +277,12 @@ class DeviceSession(
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray,
         ) {
-            val firstData = !gattGotFirstData
             gattGotFirstData = true
             if (!isStreaming()) return
-            if (firstData) sendQueue.offer(uf1EncodeDeviceName(devId, nextSeq(), deviceName))
+            if (namePending) {
+                namePending = false
+                sendQueue.offer(uf1EncodeDeviceName(devId, nextSeq(), resolvedName ?: mac))
+            }
             mainHandler.post { status = Status.STREAMING }
             handleGattNotify(value)
         }
