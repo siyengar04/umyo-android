@@ -241,8 +241,10 @@ class DeviceSession(
         ) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
                 val v = characteristic.value ?: return
+                val firstData = !gattGotFirstData
                 gattGotFirstData = true
                 if (!isStreaming()) return
+                if (firstData) sendQueue.offer(uf1EncodeDeviceName(devId, nextSeq(), deviceName))
                 mainHandler.post { status = Status.STREAMING }
                 handleGattNotify(v)
             }
@@ -254,8 +256,10 @@ class DeviceSession(
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray,
         ) {
+            val firstData = !gattGotFirstData
             gattGotFirstData = true
             if (!isStreaming()) return
+            if (firstData) sendQueue.offer(uf1EncodeDeviceName(devId, nextSeq(), deviceName))
             mainHandler.post { status = Status.STREAMING }
             handleGattNotify(value)
         }

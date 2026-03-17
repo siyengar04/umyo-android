@@ -1,5 +1,6 @@
 package com.example.uf1bridgedemo
 
+import android.os.SystemClock
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.zip.CRC32
@@ -91,6 +92,24 @@ internal fun uf1EncodeFrameStatusEmg(
     }.array()
 
     return header + payload
+}
+
+// Block type 0x07: device name announcement, UTF-8, 1–32 bytes, no null terminator.
+// Sent once per session on first data notification so the workbench can label the stream.
+internal fun uf1EncodeDeviceName(devId: UInt, seq: UInt, name: String): ByteArray {
+    val nameBytes = name.toByteArray(Charsets.UTF_8)
+        .let { if (it.size > 32) it.copyOf(32) else it }
+        .let { if (it.isEmpty()) byteArrayOf('?'.code.toByte()) else it }
+
+    val tUs = (SystemClock.elapsedRealtimeNanos() / 1000L) and ((1L shl 48) - 1)
+
+    val statusVal = ByteBuffer.allocate(10).order(ByteOrder.LITTLE_ENDIAN).apply {
+        putInt(0); putShort(0)      // no t_src, no sample_rate
+        put(255.toByte()); put(0)   // battery unknown, rssi unknown
+        put(0); put(0)
+    }.array()
+
+    return uf1EncodeFrameStatusPlusBlock(devId, seq, tUs, statusVal, 0x07, nameBytes)
 }
 
 internal fun crc32U32(data: ByteArray): UInt {
