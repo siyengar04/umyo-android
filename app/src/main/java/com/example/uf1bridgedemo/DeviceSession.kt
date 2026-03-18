@@ -64,6 +64,8 @@ class DeviceSession(
     // Guaranteed non-null before first onCharacteristicChanged fires: handleNameRead sets it
     // before calling enableTelemetry, and notifications only start after enableTelemetry completes.
     @Volatile private var resolvedName: String? = null
+    // Guards the 5-second name-repeat thread; set false to stop it on disconnect.
+    @Volatile private var nameRepeatActive     = false
 
     // ---- Per-device UF1 sequencing ----
     private val seqCounter = AtomicInteger(0)
@@ -135,6 +137,7 @@ class DeviceSession(
 
     /** Cleanly close the GATT connection. */
     fun disconnect() {
+        nameRepeatActive = false
         mainHandler.post { status = Status.DISCONNECTED }
         try { gatt?.disconnect() } catch (_: Exception) {}
         try { gatt?.close()     } catch (_: Exception) {}
@@ -160,6 +163,7 @@ class DeviceSession(
                 gattServicesStarted = false
                 gattGotFirstData    = false
                 telemetryStarted    = false
+                nameRepeatActive    = false
                 resolvedName        = null
                 mainHandler.post { status = Status.CONNECTED }
 
@@ -310,6 +314,7 @@ class DeviceSession(
                     val nameForFrame = resolvedName ?: mac
                     val offered = sendQueue.offer(uf1EncodeDeviceName(devId, nextSeq(), nameForFrame))
                     Log.d("DeviceSession", "[$mac] name frame: resolvedName=\"$nameForFrame\" offer=$offered")
+                    startNameRepeat()
                 }
                 if (!isStreaming()) return
                 mainHandler.post { status = Status.STREAMING }
@@ -330,6 +335,7 @@ class DeviceSession(
                 val nameForFrame = resolvedName ?: mac
                 val offered = sendQueue.offer(uf1EncodeDeviceName(devId, nextSeq(), nameForFrame))
                 Log.d("DeviceSession", "[$mac] name frame: resolvedName=\"$nameForFrame\" offer=$offered")
+                startNameRepeat()
             }
             if (!isStreaming()) return
             mainHandler.post { status = Status.STREAMING }
@@ -340,6 +346,19 @@ class DeviceSession(
     // ------------------------------------------------------------
     // GATT helpers
     // ------------------------------------------------------------
+
+    /** Start the 5-second periodic name-frame re-announce. Idempotent. */
+    private fun startNameRepeat() {
+        if (nameRepeatActive) return
+        nameRepeatActive = true
+        thread {
+            while (nameRepeatActive) {
+                Thread.sleep(5000)
+                if (!nameRepeatActive) break
+                reEnqueueNameFrame(sendQueue)
+            }
+        }
+    }
 
     private fun enableTelemetry(g: BluetoothGatt, svc: BluetoothGattService, onLog: (String) -> Unit) {
         telemetryStarted = true
